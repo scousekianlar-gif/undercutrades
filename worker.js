@@ -1199,7 +1199,7 @@ async function lookup(input) {
     const d = j && j.result;
     if (!r.ok || !d) throw new Error("lookup failed");
     const town = d.admin_district || d.parish || d.admin_ward || null;
-    v = { ok: true, postcode: d.postcode || pc, town, region: d.region || d.country || "England", lat: d.latitude, lng: d.longitude };
+    v = { ok: true, postcode: d.postcode || pc, town, region: d.region || d.country || "England", country: d.country || "England", lat: d.latitude, lng: d.longitude };
   } catch (e) {
     // lookup service unreachable: accept a correctly shaped postcode and localise by its area only
     v = { ok: true, postcode: pc, town: null, region: null, approximate: true };
@@ -1213,7 +1213,7 @@ async function lookup(input) {
 // the place name Google Shopping is asked to localise to
 function locationString(loc) {
   if (!loc || !loc.town) return "";
-  return [loc.town, loc.region && loc.region !== loc.town ? loc.region : "England", "United Kingdom"].join(", ");
+  return [loc.town, loc.country || "England", "United Kingdom"].join(", ");
 }
 
 module.exports = { normalise, lookup, locationString };
@@ -1446,7 +1446,13 @@ const SOURCES = {
   google: {
     label: "Google Shopping",
     async search(q, location) {
-      const j = await serp(Object.assign({ engine: "google_shopping", q, gl: "uk", hl: "en", google_domain: "google.co.uk", num: "60" }, location ? { location } : {}));
+      const base = { engine: "google_shopping", q, gl: "uk", hl: "en", google_domain: "google.co.uk", num: "60" };
+      let j;
+      try { j = await serp(Object.assign({}, base, location ? { location } : {})); }
+      catch (e) {
+        // SerpApi only accepts places from its own list; if it doesn't know this one, search the whole UK instead of failing
+        if (location && /location/i.test(String(e && e.message))) j = await serp(base); else throw e;
+      }
       return [].concat(j.shopping_results || [], j.inline_shopping_results || []).map(it => {
         const price = typeof it.extracted_price === "number" ? it.extracted_price : parseMoney(it.price);
         const extra = [it.delivery, ...(it.extensions || []), it.snippet, it.tag].filter(Boolean).join(" · ");
