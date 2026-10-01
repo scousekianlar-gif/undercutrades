@@ -1,0 +1,10 @@
+{
+  "name": "patient-term-5f88",
+  "main": "worker.js",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": { "bindings": [{ "name": "APP", "class_name": "UndercutApp" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UndercutApp"] }],
+  "triggers": { "crons": ["0 */6 * * *"] },
+  "vars": { "SOURCES": "google", "SERPAPI_DAILY_LIMIT": "100" }
+}
