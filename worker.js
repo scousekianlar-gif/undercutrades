@@ -923,6 +923,7 @@ async function route(req, res) {
         return send(res, 200, Object.assign(buildView(data, { pro: reveal, trustedOnly: url.searchParams.get("view") === "trusted" }), { usedFreeUnlock, location: loc ? { postcode: loc.postcode, town: loc.town } : null }));
       } catch (err) {
         console.error("search failed:", q, err.message);
+        sources.noteError("Search failed: " + (err && err.message));
         if (err.code === "daily_limit" || err.code === "quota") return bad(res, 503, "feed_paused", "Live prices are busy right now. Try this search again later, or try one of the popular searches below.");
         return bad(res, 502, "provider_failed", "The price feed didn't answer. Try again in a moment.");
       }
@@ -1425,7 +1426,9 @@ async function serp(params) {
   usage.calls++;
   const u = new URL(BASE());
   u.search = new URLSearchParams(Object.assign({}, params, { api_key: KEY() })).toString();
-  const r = await fetch(u, { signal: AbortSignal.timeout(20000) });
+  let r;
+  try { r = await fetch(u, { signal: AbortSignal.timeout(20000) }); }
+  catch (e) { usage.lastError = "Could not reach the price feed: " + (e && e.message || e); throw e; }
   const j = await r.json().catch(() => ({}));
   if (j.error && /hasn.t returned any results|no results/i.test(j.error)) return {};          // nothing found is an answer, not a failure
   if (r.status === 429 || (j.error && /run out of searches|plan|limit|exceeded|quota/i.test(j.error))) {
@@ -1594,7 +1597,8 @@ function affiliate(url) {
   } catch (_) { return url; }
 }
 
-module.exports = { searchAll, goEntry, resolveEntry, feedStatus, relevant, parseCode, parseDelivery, enabledSources, SOURCES };
+const noteError = msg => { usage.lastError = String(msg || "").slice(0, 300); };
+module.exports = { noteError, searchAll, goEntry, resolveEntry, feedStatus, relevant, parseCode, parseDelivery, enabledSources, SOURCES };
 
 },
 "lib/specs.js": function (module, exports, require, __dirname, __filename) {
