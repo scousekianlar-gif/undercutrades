@@ -365,6 +365,34 @@ const productBySlug = slug => PAGES.products.find(p => p.slug === slug);
 const categoryBySlug = slug => PAGES.categories.find(c => c.slug === slug);
 const nameFromSlug = slug => slug.split("-").filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 
+// The page as first sent: the asked-for section already showing, and the trader details and contact email
+// written in. Visitors' phones would fill these in anyway; Google and link previews don't run the page's code.
+const PANE_VIEWS = ["home", "about", "terms", "contact", "privacy", "pro", "account", "notfound"];
+const pageTemplates = new Map();
+function traderLine() {
+  const clean = v => String(v == null ? "" : v).replace(/\s*\n\s*/g, ", ").replace(/\s+/g, " ").trim();
+  let t = "Undercut is a trading name of " + (clean(ENV.TRADER_NAME) || clean(ENV.FOUNDER_NAME) || "Kian") + ", sole trader";
+  if (clean(ENV.TRADER_ADDRESS)) t += ", " + clean(ENV.TRADER_ADDRESS);
+  if (clean(ENV.CONTACT_EMAIL)) t += " · " + clean(ENV.CONTACT_EMAIL);
+  if (clean(ENV.VAT_NUMBER)) t += " · VAT number " + clean(ENV.VAT_NUMBER);
+  return t;
+}
+function pageTemplate(view) {
+  const v = PANE_VIEWS.includes(view) ? view : "home";
+  if (pageTemplates.has(v)) return pageTemplates.get(v);
+  let t = TEMPLATE.replace(/<main id="view-([a-z]+)"([^>]*)>/g, (m, id, rest) => {
+    const attrs = rest.replace(/\shidden(?=[\s>]|$)/, "");
+    return '<main id="view-' + id + '"' + (id === v ? attrs : attrs + " hidden") + ">";
+  });
+  const trader = escHtml(traderLine());
+  t = t.replace(/(<(p|span|div)\b[^>]*\bdata-trader\b[^>]*>)(<\/\2>)/g, (m, open, tag, close) => open + trader + close);
+  if (ENV.CONTACT_EMAIL) {
+    const e = escHtml(ENV.CONTACT_EMAIL);
+    t = t.replace(/(<b data-contact>)our contact email(<\/b>)/g, "$1" + e + "$2").replace(/(<b id="contactEmail">)our contact email(<\/b>)/, "$1" + e + "$2");
+  }
+  pageTemplates.set(v, t);
+  return t;
+}
 function renderPage(res, { view = "home", title, desc, urlPath = "/", q = null, category = null, status = 200, noindex = false }) {
   const pageData = { view, q, category, product: q ? true : false };
   const head =
@@ -379,7 +407,7 @@ function renderPage(res, { view = "home", title, desc, urlPath = "/", q = null, 
     `<meta name="twitter:card" content="summary_large_image"><meta name="theme-color" content="#121212"><link rel="manifest" href="/manifest.webmanifest">` +
     `<link rel="icon" href="/favicon.svg" type="image/svg+xml">` +
     `<script>window.__PAGE__=${JSON.stringify(pageData).replace(/</g, "\\u003c")}</script>`;
-  const html = '<!doctype html><html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">' + head + "</head><body>" + TEMPLATE + "</body></html>";
+  const html = '<!doctype html><html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">' + head + "</head><body>" + pageTemplate(view) + "</body></html>";
   send(res, status, html, "text/html; charset=utf-8");
 }
 function sitemap() {
