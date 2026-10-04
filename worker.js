@@ -279,7 +279,7 @@ async function handleJob(req, res, member, pro, ip) {
   const priced = await Promise.all(items.map(async it => {
     try {
       const query = withContext(it.q);
-      const view = buildView(await getOffers(query, undefined, jobLoc, pro ? "pro" : "free", { extra: false }), { pro: true, codesPro: pro, trustedOnly });
+      const view = buildView(await getOffers(query, undefined, jobLoc, pro ? "pro" : "free", { extra: true, trade: scope.tradesOf(it.q)[0] || trade }), { pro: true, codesPro: pro, trustedOnly });
       // A wrong spec (gang, amps, size) is worse than a different pack size, which just means buying more of them.
       const miss = o => ((o.match && o.match.missingSpecs) || []).reduce((n, m) => n + (/^pack of /.test(m) ? 1 : 2), 0);
       let opts = view.offers.filter(o => units.sizeMatches(it.q, o.title) && !(o.spec && o.spec.conflicts.length) && miss(o) === 0);
@@ -365,7 +365,7 @@ async function getOffers(q, trade, loc, tier = "free", opts = {}) {
         if (!(tier === "pro" && (e.code === "free_limit" || e.code === "alert_limit"))) throw e;   // Pro searches for itself
       }
     }
-    const p = sources.searchAll(q, now(), searchContext, place, tier, { extra: opts.extra });
+    const p = sources.searchAll(q, now(), searchContext, place, tier, { extra: opts.extra, trade: scope.tradesOf(q)[0] || opts.trade || (trade ? String(trade).toLowerCase() : "") });
     inflight.set(key, p);
     try { entry = { at: now(), data: await p }; if (opts.onLive) opts.onLive(); }
     catch (e) {
@@ -1644,15 +1644,19 @@ module.exports = { send, layout, button, esc, enabled: () => Boolean(process.env
     }).sort(function (a, b) { return b.covered - a.covered || (a.trust === "trusted" ? 0 : 1) - (b.trust === "trusted" ? 0 : 1) || a.total - b.total; });
     var full = stops.filter(function (s) { return !s.missing.length; }).sort(function (a, b) { return a.total - b.total; });
     var bestFull = full[0] || null, dearestFull = full[full.length - 1] || null;
+    // The "one stop" suggestion is a proper supplier where there is one (Screwfix, CEF, Wickes…), never a marketplace
+    // seller a tradesperson would write off. It still has to cover the most items it can.
+    var proper = function (s) { return s.trust === "trusted" || s.trust === "known"; };
+    var oneStop = full.filter(proper)[0] || stops.filter(proper)[0] || bestFull || stops[0] || null;
 
     // "Cheapest" never costs more than buying everything in one place.
     if (optimise === "cheapest" && bestFull && bestFull.total < split.total) {
       split = { lines: bestFull.lines, goods: bestFull.goods, delivery: bestFull.delivery, shops: [bestFull.store], total: bestFull.total };
     }
     return {
-      split: split, oneStop: bestFull || stops[0] || null,
+      split: split, oneStop: oneStop,
       alternatives: stops.slice(0, 5).map(function (s) { return { store: s.store, trust: s.trust, total: s.total, covered: s.covered, missing: s.missing }; }),
-      savingVsOneStop: bestFull ? round2(bestFull.total - split.total) : null,
+      savingVsOneStop: oneStop && !oneStop.missing.length ? round2(oneStop.total - split.total) : (bestFull ? round2(bestFull.total - split.total) : null),
       savingVsDearest: dearestFull ? round2(dearestFull.total - split.total) : null
     };
   }
@@ -1999,7 +2003,14 @@ const SERPER_KEY = () => ENV.SERPER_API_KEY || "";
 const SERPER_BASE = () => (ENV.SERPER_BASE || "https://google.serper.dev").replace(/\/+$/, "");
 const MAX_OFFERS = 40;
 // The trade counters people expect to see (names as normalised by trust.norm)
-const TRADE_COUNTERS = new Set(["screwfix", "toolstation", "cef", "city electrical factors", "tlc direct", "tlc electrical", "rexel", "edmundson", "edmundson electrical", "electrical direct", "city plumbing", "plumb center", "travis perkins", "jewson", "wickes", "b&q"]);
+const TRADE_COUNTERS = new Set(["screwfix", "toolstation", "cef", "city electrical factors", "tlc direct", "tlc electrical", "rexel", "edmundson", "edmundson electrical", "electrical direct", "city plumbing", "plumb center", "wolseley", "plumbase", "travis perkins", "jewson", "selco", "wickes", "b&q", "topps tiles", "dulux decorator centre", "brewers", "euro car parts", "gsf car parts", "halfords"]);
+// The trade counters a tradesperson expects to see for each trade (used to steer the extra search)
+const COUNTERS_BY_TRADE = {
+  electrical: "Screwfix CEF Rexel Toolstation", plumbing: "Screwfix Toolstation City Plumbing Plumb Center", heating: "Screwfix Toolstation City Plumbing Plumb Center",
+  ac: "Screwfix Toolstation Wolseley", brickwork: "Wickes B&Q Travis Perkins Jewson", plastering: "Wickes B&Q Travis Perkins Jewson", groundwork: "Wickes B&Q Travis Perkins Jewson",
+  roofing: "Wickes B&Q Travis Perkins Jewson", joinery: "Wickes B&Q Screwfix Travis Perkins", painting: "Dulux Decorator Centre Brewers Wickes B&Q",
+  tiling: "Topps Tiles Wickes B&Q Screwfix", glazing: "Screwfix Toolstation Wickes", mechanic: "Euro Car Parts GSF Halfords", plant: "Screwfix Toolstation", maintenance: "Screwfix Toolstation Wickes B&Q"
+};
 
 const round2 = n => Math.round(n * 100) / 100;
 const httpsUrl = u => typeof u === "string" && /^https:\/\//i.test(u) ? u : null;
@@ -2240,13 +2251,15 @@ async function searchAll(q, now, searchContext = "", location = "", tier = "free
   // Google Shopping often leaves out the big trade counters. If fewer than two of them came back, one extra
   // search aimed at them (1 credit; EXTRA_TRADE_SEARCH=0 turns it off) so the comparison includes the names people expect.
   const gi = names.indexOf("google");
-  // (a second credit, so only for Pro unless EXTRA_TRADE_SEARCH=1 turns it on for free searches too)
-  const extraOn = ENV.EXTRA_TRADE_SEARCH === "1" || (ENV.EXTRA_TRADE_SEARCH !== "0" && tier === "pro");
+  // (a second credit: on for everyone when Serper is the feed, as its credits cost a fraction of a penny; with SerpApi
+  // alone it's Pro only, unless EXTRA_TRADE_SEARCH=1 turns it on; EXTRA_TRADE_SEARCH=0 turns it off for everyone)
+  const extraOn = ENV.EXTRA_TRADE_SEARCH === "1" || (ENV.EXTRA_TRADE_SEARCH !== "0" && (tier === "pro" || Boolean(SERPER_KEY())));
   if (gi >= 0 && settled[gi].status === "fulfilled" && extraOn && opts.extra !== false) {
     const present = new Set(settled[gi].value.map(it => trust.norm(it.store)).filter(n => TRADE_COUNTERS.has(n)));
     if (present.size < 2) {
       try {
-        const more = await SOURCES.google.search(providerQuery + " Screwfix Toolstation CEF TLC Direct", location, tier);
+        const trade = opts.trade && COUNTERS_BY_TRADE[opts.trade] ? opts.trade : (require("./scope.js").tradesOf(q)[0] || "maintenance");
+        const more = await SOURCES.google.search(providerQuery + " " + (COUNTERS_BY_TRADE[trade] || COUNTERS_BY_TRADE.maintenance), location, tier);
         settled[gi] = { status: "fulfilled", value: settled[gi].value.concat(more) };
       } catch (e) { console.error("extra trade search failed:", e && e.message); if (e && e.code) partial = true; }
     }
