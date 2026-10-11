@@ -1113,9 +1113,22 @@ function handleRetailerPrepare(req, res) {
   });
 }
 
+// TRUST_PROXY says how far to trust X-Forwarded-For:
+//   unset or "1"   one proxy in front (Hostinger, Railway): the last address in the header
+//   "2", "3" ...   that many proxies in front: the address that many places from the end
+//   "cloudflare"   behind Cloudflare: its CF-Connecting-IP header
+//   "0"            no proxy: the direct connection
 function clientIp(req) {
-  const xff = String(req.headers["x-forwarded-for"] || "").split(",").map(v => v.trim()).filter(Boolean);
-  let ip = ((ENV.TRUST_PROXY !== "0" && xff.length) ? xff[xff.length - 1] : (req.socket && req.socket.remoteAddress) || "").slice(0, 64);
+  const tp = String(ENV.TRUST_PROXY == null ? "1" : ENV.TRUST_PROXY).trim().toLowerCase();
+  const direct = (req.socket && req.socket.remoteAddress) || "";
+  let ip = direct;
+  if (tp === "cloudflare") ip = String(req.headers["cf-connecting-ip"] || "").trim() || direct;
+  else if (tp !== "0" && tp !== "") {
+    const hops = Math.max(1, parseInt(tp, 10) || 1);
+    const xff = String(req.headers["x-forwarded-for"] || "").split(",").map(v => v.trim()).filter(Boolean);
+    ip = xff.length >= hops ? xff[xff.length - hops] : (xff[0] || direct);
+  }
+  ip = ip.slice(0, 64);
   if (ip.includes(":") && !/^::ffff:/i.test(ip)) {                 // IPv6: one household/phone gets a whole /64, so group by it
     const parts = ip.split("::")[0].split(":"); ip = parts.concat(["0", "0", "0", "0"]).slice(0, 4).join(":") + "::/64";
   }
@@ -1532,8 +1545,10 @@ if (require.main === module) {
     process.exit(1);
   });
   // Save any pending changes when the host stops or restarts the app.
-  const shutdown = () => { Promise.resolve(store.flush()).catch(() => {}).finally(() => process.exit(0)); };
-  process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown);
+  const shutdown = () => { store.flushSync(); Promise.resolve(store.flush()).catch(() => {}).finally(() => process.exit(0)); };
+  process.on("SIGTERM", shutdown); process.on("SIGINT", shutdown); process.on("SIGHUP", shutdown); process.on("SIGBREAK", shutdown);
+  // A crash saves what it can (JSON file only) before the host restarts the app.
+  process.on("uncaughtException", e => { console.error("uncaughtException:", e && e.stack || e); store.flushSync(); process.exit(1); });
 }
 
 },
@@ -3077,7 +3092,10 @@ let chain=Promise.resolve(), firstPending=0;
 async function writeMySQL(){ if(!mysqlPool||!mysqlReady)return; try{ await mysqlPool.query("INSERT INTO app_state (state_key,state_json) VALUES ('primary',?) ON DUPLICATE KEY UPDATE state_json=VALUES(state_json),updated_at=CURRENT_TIMESTAMP",[JSON.stringify(db)]); mysqlError=null; }catch(e){ mysqlError=e.message; console.error("MySQL persistence error:",e.message); } }
 function flush(){ clearTimeout(timer); timer=null; dirty=false; chain=chain.then(()=>DRIVER==="mysql"?writeMySQL():DRIVER==="durable"?writeDurable():writeJson()).catch(e=>{ mysqlError=e.message; console.error("store flush failed:",e.message); }); return chain; }
 function save(){ dirty=true; if(!timer) firstPending=Date.now(); clearTimeout(timer); timer=setTimeout(flush, Date.now()-firstPending>2000?0:200); }
-process.on("exit",()=>{ if(DRIVER==="json"&&timer) writeJson(); });
+// Synchronous save for the moments the process is about to die (crash, shutdown). Only the JSON file can do this;
+// MySQL and Durable Object saves are async, so they rely on flush().
+function flushSync(){ if(DRIVER!=="json"||!dirty&&!timer) return false; clearTimeout(timer); timer=null; dirty=false; try{ writeJson(); return true; }catch(e){ console.error("store flushSync failed:",e.message); return false; } }
+process.on("exit",()=>{ flushSync(); });
 const id=(n=12)=>crypto.randomBytes(n).toString("base64url");
 // A signing secret kept with the data, for hosts where it isn't set as a setting (Cloudflare).
 function secret(){ db.meta = db.meta || {}; if (!db.meta.secret) { db.meta.secret = crypto.randomBytes(32).toString("hex"); save(); } return db.meta.secret; }
@@ -3112,7 +3130,7 @@ async function cacheSweep(maxAgeMs){
 }
 const normEmail=e=>String(e||"").trim().toLowerCase();
 const validEmail=e=>/^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,}$/i.test(e)&&e.length<=254;
-module.exports={get db(){return db;},save,flush,init,id,useDurable,secret,cacheGet,cachePut,cacheSweep,isDirty:()=>dirty,normEmail,validEmail,findUser:pred=>db.users.find(pred),userByEmail:email=>db.users.find(u=>u.email===normEmail(email)),userById:uid=>db.users.find(u=>u.id===uid),userByRef:code=>db.users.find(u=>u.refCode===String(code||"").toUpperCase()),health:()=>({driver:DRIVER,connected:DRIVER==="mysql"?mysqlReady:true,error:mysqlError}),reload(){db=loadJson();}};
+module.exports={get db(){return db;},save,flush,flushSync,init,id,useDurable,secret,cacheGet,cachePut,cacheSweep,isDirty:()=>dirty,normEmail,validEmail,findUser:pred=>db.users.find(pred),userByEmail:email=>db.users.find(u=>u.email===normEmail(email)),userById:uid=>db.users.find(u=>u.id===uid),userByRef:code=>db.users.find(u=>u.refCode===String(code||"").toUpperCase()),health:()=>({driver:DRIVER,connected:DRIVER==="mysql"?mysqlReady:true,error:mysqlError}),reload(){db=loadJson();}};
 
 },
 "lib/stripe.js": function (module, exports, require, __dirname, __filename) {
